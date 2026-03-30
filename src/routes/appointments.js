@@ -5,7 +5,7 @@ const Appointment = require('../models/Appointment');
 const User = require('../models/User');
 const verifyToken = require('../middleware/verifyToken');
 const verifyAdmin = require('../middleware/verifyAdmin');
-const { notifyAdminNewBooking, notifyMissedAppointment } = require('../services/fcmService');
+const { notifyAdminNewBooking, notifyMissedAppointment, notifyRejectedAppointment } = require('../services/fcmService');
 
 const router = express.Router();
 
@@ -382,7 +382,12 @@ router.patch('/:id/status', verifyAdmin, async (req, res) => {
     if (status === 'missed') {
       const user = await User.findById(appointment.bookedBy).lean();
       if (user?.fcmToken) {
-        notifyMissedAppointment(user.fcmToken, appointment.slot, appointment.date).catch(() => {});
+        notifyMissedAppointment(user.fcmToken, appointment.slot, appointment.date, id).catch(() => {});
+      }
+    } else if (status === 'rejected') {
+      const user = await User.findById(appointment.bookedBy).lean();
+      if (user?.fcmToken) {
+        notifyRejectedAppointment(user.fcmToken, appointment.slot, appointment.date, id).catch(() => {});
       }
     }
 
@@ -460,6 +465,146 @@ router.post('/:id/complete', verifyAdmin, async (req, res) => {
     session.endSession();
     console.error('POST /api/appointments/:id/complete error:', err);
     return res.status(500).json({ success: false, message: 'Server error during completion flow.' });
+  }
+});
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   GET /api/appointments/suggest-next
+   ───────────────────────────────────────────────────────────────────────────
+   Scans starting from today IST forward to find the VERY FIRST date + slot
+   that has fewer than 5 patients and is not a Sunday or expired.
+   Returns: { date, slot }
+   ═══════════════════════════════════════════════════════════════════════════ */
+router.get('/suggest-next', verifyToken, async (req, res) => {
+  try {
+    const SLOTS = ['10:00 AM - 02:00 PM', '03:00 PM - 07:00 PM'];
+    
+    // Time boundaries (IST)
+    const now = new Date();
+    const utcMs = now.getTime() + (now.getTimezoneOffset() * 60000);
+    let currentIst = new Date(utcMs + (3600000 * 5.5));
+    
+    const todayHour = currentIst.getHours();
+    const todayMinute = currentIst.getMinutes();
+    
+    // We scan up to 14 days ahead
+    for (let dayOffset = 0; dayOffset < 14; dayOffset++) {
+      const scanDate = new Date(currentIst.getTime() + (dayOffset * 86400000));
+      if (scanDate.getUTCDay() === 0) continue; // Skip Sundays
+      
+      const dateStr = `${scanDate.getFullYear()}-${String(scanDate.getMonth() + 1).padStart(2, '0')}-${String(scanDate.getDate()).padStart(2, '0')}`;
+      const isToday = (dayOffset === 0);
+
+      for (const slot of SLOTS) {
+        if (isToday) {
+          if (slot === '10:00 AM - 02:00 PM' && (todayHour > 10 || (todayHour === 10 && todayMinute > 0))) continue;
+          if (slot === '03:00 PM - 07:00 PM' && (todayHour > 15 || (todayHour === 15 && todayMinute > 0))) continue;
+        }
+
+        const count = await Appointment.getSlotOccupancy(dateStr, slot);
+        if (count < 5) {
+          // Found the immediate next valid slot
+          return res.status(200).json({ success: true, date: dateStr, slot });
+        }
+      }
+    }
+
+    return res.status(404).json({ success: false, message: 'No available slots found in the next 14 days.' });
+  } catch (err) {
+    console.error('GET /api/appointments/suggest-next error:', err);
+    return res.status(500).json({ success: false, message: 'Server error parsing suggestions.' });
+  }
+});
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   POST /api/appointments/recover/:oldId
+   ───────────────────────────────────────────────────────────────────────────
+   Receives a previous rejected/missed appointment ID and identical user metadata
+   to seamlessly map into a brand new pending slot.
+   Body: { date, slot }
+   ═══════════════════════════════════════════════════════════════════════════ */
+router.post('/recover/:oldId', verifyToken, async (req, res) => {
+  const { date, slot } = req.body;
+  const { oldId } = req.params;
+
+  if (!date || !slot) return res.status(400).json({ success: false, message: 'date and slot are required.' });
+
+  const session = await mongoose.startSession();
+  session.startTransaction();
+
+  try {
+    const oldAppt = await Appointment.findById(oldId).lean();
+    if (!oldAppt) {
+      await session.abortTransaction();
+      session.endSession();
+      return res.status(404).json({ success: false, message: 'Original appointment not found.' });
+    }
+
+    if (oldAppt.bookedBy.toString() !== req.user.id) {
+      await session.abortTransaction();
+      session.endSession();
+      return res.status(403).json({ success: false, message: 'Unauthorized recovery access.' });
+    }
+
+    const occupancy = await Appointment.getSlotOccupancy(date, slot, session);
+    if (occupancy >= 5) {
+      await session.abortTransaction();
+      session.endSession();
+      return res.status(409).json({ success: false, message: 'Selected slot is fully booked.', slotFull: true });
+    }
+
+    const [newAppointment] = await Appointment.create([{
+      bookedBy: req.user.id,
+      patientName: oldAppt.patientName,
+      patientPhone: oldAppt.patientPhone,
+      age: oldAppt.age,
+      isSelf: oldAppt.isSelf,
+      isOffline: false,
+      date,
+      slot,
+      status: 'pending',
+      issueDescription: oldAppt.issueDescription,
+      comments: oldAppt.comments,
+    }], { session });
+
+    // Mark the old one as acknowledged so it leaves the feed automatically
+    await Appointment.findByIdAndUpdate(oldId, { recoveryAcknowledged: true }, { session });
+
+    await session.commitTransaction();
+    session.endSession();
+
+    // Notify Admin natively of the new booking recovery
+    User.findOne({ role: 'admin' }).then((adminUser) => {
+      if (adminUser?.fcmToken) notifyAdminNewBooking(adminUser.fcmToken, oldAppt.patientName, slot, date).catch(() => {});
+    }).catch(() => {});
+
+    return res.status(201).json({ success: true, message: 'Recovered successfully.', appointment: newAppointment });
+  } catch (err) {
+    await session.abortTransaction();
+    session.endSession();
+    console.error('POST /api/appointments/recover error:', err);
+    return res.status(500).json({ success: false, message: 'Server error recovering.' });
+  }
+});
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   PATCH /api/appointments/:id/dismiss-recovery
+   ───────────────────────────────────────────────────────────────────────────
+   Hides the missed/rejected appointment from the user's notification feed.
+   ═══════════════════════════════════════════════════════════════════════════ */
+router.patch('/:id/dismiss-recovery', verifyToken, async (req, res) => {
+  try {
+    const appointment = await Appointment.findOneAndUpdate(
+      { _id: req.params.id, bookedBy: req.user.id },
+      { $set: { recoveryAcknowledged: true } },
+      { new: true }
+    );
+    if (!appointment) return res.status(404).json({ success: false, message: 'Appointment not found.' });
+    
+    return res.status(200).json({ success: true, appointment });
+  } catch (err) {
+    console.error('PATCH /dismiss-recovery error:', err);
+    return res.status(500).json({ success: false, message: 'Server error dismissing.' });
   }
 });
 

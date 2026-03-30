@@ -97,16 +97,32 @@ const notifyAdminNewBooking = async (adminFcmToken, patientName, slot, date) => 
 };
 
 /**
- * Notifies a patient that they missed their appointment.
+ * Notifies a patient that their appointment was canceled/rejected by Admin.
  */
-const notifyMissedAppointment = async (fcmToken, slot, date) => {
-  const title = 'Mana Hospital — Appointment Missed';
-  const body = `You missed your appointment at Mana Hospital scheduled for ${slot} on ${date}. Please contact us to reschedule.`;
+const notifyRejectedAppointment = async (fcmToken, slot, date, oldId) => {
+  const title = 'Mana Hospital — Appointment Rejected';
+  const body = `Your appointment for ${slot} on ${date} could not be confirmed. Tap here to re-book a free slot.`;
 
   return sendPushNotification(fcmToken, title, body, {
-    type: 'MISSED_APPOINTMENT',
+    type: 'RECOVERY_SUGGESTION',
     slot,
     date,
+    oldId: String(oldId),
+  });
+};
+
+/**
+ * Notifies a patient that they missed their appointment.
+ */
+const notifyMissedAppointment = async (fcmToken, slot, date, oldId) => {
+  const title = 'Mana Hospital — Appointment Missed';
+  const body = `You missed your appointment at Mana Hospital scheduled for ${slot} on ${date}. Tap to re-book.`;
+
+  return sendPushNotification(fcmToken, title, body, {
+    type: 'RECOVERY_SUGGESTION',
+    slot,
+    date,
+    oldId: String(oldId),
   });
 };
 
@@ -124,4 +140,11 @@ const notifyFollowUpReminder = async (fcmToken, slot, date) => {
   });
 };
 
-module.exports = { sendPushNotification, notifyHoldRejected, notifyAdminNewBooking, notifyMissedAppointment, notifyFollowUpReminder };
+module.exports = { 
+  sendPushNotification, 
+  notifyHoldRejected, 
+  notifyAdminNewBooking, 
+  notifyMissedAppointment, 
+  notifyRejectedAppointment,
+  notifyFollowUpReminder 
+};

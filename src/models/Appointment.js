@@ -80,6 +80,11 @@ const appointmentSchema = new mongoose.Schema(
       type: Boolean,
       default: false,
     },
+    // Tracks if the patient has dismissed the recovery suggestion card
+    recoveryAcknowledged: {
+      type: Boolean,
+      default: false,
+    },
 
     /* ── Slot details ────────────────────────────────── */
     isOffline: {
