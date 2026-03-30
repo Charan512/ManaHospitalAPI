@@ -48,6 +48,9 @@ const appointmentSchema = new mongoose.Schema(
       required: true,
       trim: true,
     },
+    age: {
+      type: Number,
+    },
     isSelf: {
       type: Boolean,
       default: true,

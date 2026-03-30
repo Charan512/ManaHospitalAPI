@@ -25,11 +25,44 @@ router.get('/slots', async (req, res) => {
 
   try {
     const SLOTS = ['10:00 AM - 02:00 PM', '03:00 PM - 07:00 PM'];
+    
+    // Time-Gate logic based on IST
+    const now = new Date();
+    const utcMs = now.getTime() + (now.getTimezoneOffset() * 60000);
+    const istNow = new Date(utcMs + (3600000 * 5.5));
+    
+    // Check if the requested date is a Sunday
+    const requestedDateObj = new Date(date);
+    const isSunday = requestedDateObj.getUTCDay() === 0;
+
+    const istString = `${istNow.getFullYear()}-${String(istNow.getMonth() + 1).padStart(2, '0')}-${String(istNow.getDate()).padStart(2, '0')}`;
+    const todayHour = istNow.getHours();
+    const todayMinute = istNow.getMinutes();
+
+    const isToday = (date === istString);
 
     const results = await Promise.all(
       SLOTS.map(async (slot) => {
+        let isExpired = false;
+        
+        if (isSunday) {
+          isExpired = true;
+        } else if (isToday) {
+          if (slot === '10:00 AM - 02:00 PM' && (todayHour > 10 || (todayHour === 10 && todayMinute > 0))) {
+            isExpired = true;
+          } else if (slot === '03:00 PM - 07:00 PM' && (todayHour > 15 || (todayHour === 15 && todayMinute > 0))) {
+            isExpired = true;
+          }
+        }
+
         const count = await Appointment.getSlotOccupancy(date, slot);
-        return { slot, booked: count, available: Math.max(0, 5 - count), isFull: count >= 5 };
+        return { 
+          slot, 
+          booked: count, 
+          available: Math.max(0, 5 - count), 
+          isFull: count >= 5,
+          isExpired
+        };
       })
     );
 
@@ -103,7 +136,7 @@ router.get('/admin/daily', verifyAdmin, async (req, res) => {
      - Notifies Admin via FCM
    ═══════════════════════════════════════════════════════════════════════════ */
 router.post('/book', verifyToken, async (req, res) => {
-  const { date, slot, isSelf, patientName, patientPhone, issueDescription, comments } = req.body;
+  const { date, slot, isSelf, patientName, patientPhone, age, issueDescription, comments } = req.body;
 
   // ── Input validation ─────────────────────────────────────────────────
   if (!date || !slot) {
@@ -115,6 +148,33 @@ router.post('/book', verifyToken, async (req, res) => {
   const validSlots = ['10:00 AM - 02:00 PM', '03:00 PM - 07:00 PM'];
   if (!validSlots.includes(slot)) {
     return res.status(400).json({ success: false, message: 'Invalid slot value.' });
+  }
+
+  // ── Time-Gate Validation ─────────────────────────────────────────────
+  const requestedDateObj = new Date(date);
+  if (requestedDateObj.getUTCDay() === 0) {
+    return res.status(400).json({ success: false, message: 'Booking not allowed on Sundays.' });
+  }
+
+  const now = new Date();
+  const utcMs = now.getTime() + (now.getTimezoneOffset() * 60000);
+  const istNow = new Date(utcMs + (3600000 * 5.5));
+  const istString = `${istNow.getFullYear()}-${String(istNow.getMonth() + 1).padStart(2, '0')}-${String(istNow.getDate()).padStart(2, '0')}`;
+  
+  // If the requested date is older than today, block it.
+  if (date < istString) {
+    return res.status(400).json({ success: false, message: 'Cannot book appointments for past dates.' });
+  }
+
+  if (date === istString) {
+    const todayHour = istNow.getHours();
+    const todayMinute = istNow.getMinutes();
+    
+    if (slot === '10:00 AM - 02:00 PM' && (todayHour > 10 || (todayHour === 10 && todayMinute > 0))) {
+      return res.status(400).json({ success: false, message: '10:00 AM slot is expired for today.', isExpired: true });
+    } else if (slot === '03:00 PM - 07:00 PM' && (todayHour > 15 || (todayHour === 15 && todayMinute > 0))) {
+      return res.status(400).json({ success: false, message: '03:00 PM slot is expired for today.', isExpired: true });
+    }
   }
 
   // ── Duplicate booking guard ──────────────────────────────────────
@@ -177,6 +237,7 @@ router.post('/book', verifyToken, async (req, res) => {
           bookedBy: req.user.id,
           patientName: resolvedName,
           patientPhone: resolvedPhone,
+          age: age != null ? Number(age) : undefined,
           isSelf: isSelf !== false,
           isOffline: false,
           date,
@@ -227,7 +288,7 @@ router.post('/book', verifyToken, async (req, res) => {
    Body: { date, slot, patientName, patientPhone }
    ═══════════════════════════════════════════════════════════════════════════ */
 router.post('/offline', verifyAdmin, async (req, res) => {
-  const { date, slot, patientName, patientPhone } = req.body;
+  const { date, slot, patientName, patientPhone, age } = req.body;
 
   if (!date || !slot || !patientName || !patientPhone) {
     return res.status(400).json({
@@ -264,6 +325,7 @@ router.post('/offline', verifyAdmin, async (req, res) => {
           bookedBy: req.user.id, // Admin's user ID
           patientName: patientName.trim(),
           patientPhone: patientPhone.trim(),
+          age: age != null ? Number(age) : undefined,
           isSelf: false,
           isOffline: true,    // ← Key distinction
           date,
