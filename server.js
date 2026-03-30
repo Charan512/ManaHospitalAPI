@@ -11,8 +11,9 @@ const fs = require('fs');
 const connectDB = require('./src/config/db');
 const { startCronJob } = require('./src/services/cronJob');   // ← specified entry point
 
-const authRouter        = require('./src/routes/auth');
+const authRouter = require('./src/routes/auth');
 const appointmentsRouter = require('./src/routes/appointments');
+const adminRouter = require('./src/routes/admin');
 
 /* ─────────────────────────────────────────────────────────────────────────
    Firebase Admin SDK Initialization
@@ -72,6 +73,7 @@ app.use(express.json());
    ───────────────────────────────────────────────────────────────────────── */
 app.use('/api/auth', authRouter);
 app.use('/api/appointments', appointmentsRouter);
+app.use('/api/admin', adminRouter);
 
 // Health check endpoint
 app.get('/health', (req, res) => {
