@@ -320,6 +320,28 @@ router.post('/offline', verifyAdmin, async (req, res) => {
     return res.status(400).json({ success: false, message: 'Invalid slot value.' });
   }
 
+  // ── Time-Gate Validation for Admin (Offline) ────────────────────────
+  const now = new Date();
+  const utcMs = now.getTime() + (now.getTimezoneOffset() * 60000);
+  const istNow = new Date(utcMs + (3600000 * 5.5));
+  const istString = `${istNow.getFullYear()}-${String(istNow.getMonth() + 1).padStart(2, '0')}-${String(istNow.getDate()).padStart(2, '0')}`;
+
+  if (date < istString) {
+    return res.status(400).json({ success: false, message: 'Cannot book walk-in appointments for past dates.' });
+  }
+
+  if (date === istString) {
+    const todayHour = istNow.getHours();
+    const todayMinute = istNow.getMinutes();
+    
+    // Check END time (14:00 for 2:00 PM, 19:00 for 7:00 PM)
+    if (slot === '10:00 AM - 02:00 PM' && (todayHour > 14 || (todayHour === 14 && todayMinute > 0))) {
+      return res.status(400).json({ success: false, message: 'This slot has already passed. Please select a future time or tomorrow\'s date.' });
+    } else if (slot === '03:00 PM - 07:00 PM' && (todayHour > 19 || (todayHour === 19 && todayMinute > 0))) {
+      return res.status(400).json({ success: false, message: 'This slot has already passed. Please select a future time or tomorrow\'s date.' });
+    }
+  }
+
   const session = await mongoose.startSession();
   session.startTransaction();
 
