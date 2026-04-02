@@ -177,19 +177,37 @@ router.post('/book', verifyToken, async (req, res) => {
     }
   }
 
-  // ── Duplicate booking guard ──────────────────────────────────────
-  // A patient cannot book again until their last appointment is rejected.
-  const existingActive = await Appointment.findOne({
-    bookedBy: req.user.id,
-    status: { $in: ['pending', 'accepted', 'on_hold'] },
-  }).lean();
+  // ── Booking Limits Guard ──────────────────────────────────────
+  if (isSelf !== false) {
+    // A. The "Self" Limit (1 Active)
+    const existingActiveSelf = await Appointment.findOne({
+      bookedBy: req.user.id,
+      isSelf: true,
+      status: { $in: ['pending', 'accepted', 'on_hold'] },
+    }).lean();
 
-  if (existingActive) {
-    return res.status(409).json({
-      success: false,
-      message: 'You already have an active appointment. You can only book again once your current appointment is rejected.',
-      hasActiveAppointment: true,
+    if (existingActiveSelf) {
+      return res.status(409).json({
+        success: false,
+        message: 'You already have an active appointment for yourself.',
+        hasActiveAppointment: true,
+      });
+    }
+  } else {
+    // B. The "Caretaker" Quota (5 Others)
+    const existingActiveOthersCount = await Appointment.countDocuments({
+      bookedBy: req.user.id,
+      isSelf: false,
+      status: { $in: ['pending', 'accepted', 'on_hold'] },
     });
+
+    if (existingActiveOthersCount >= 5) {
+      return res.status(409).json({
+        success: false,
+        message: 'You have reached the limit of 5 active family/other bookings.',
+        hasActiveAppointment: true,
+      });
+    }
   }
 
   // ── Determine patient details ────────────────────────────────────────
@@ -225,7 +243,7 @@ router.post('/book', verifyToken, async (req, res) => {
       session.endSession();
       return res.status(409).json({
         success: false,
-        message: 'This slot is fully booked. Please choose another slot or date.',
+        message: 'This specific time slot is fully booked for online users.',
         slotFull: true,
       });
     }
@@ -306,18 +324,9 @@ router.post('/offline', verifyAdmin, async (req, res) => {
   session.startTransaction();
 
   try {
-    // Still enforce the 5-slot limit — offline doesn't mean unlimited
+    // Note: Admin bookings explicitly bypass the 5-patient numerical limit.
+    // The occupancy is still tracked in the background, but we do not abort here.
     const occupancy = await Appointment.getSlotOccupancy(date, slot, session);
-
-    if (occupancy >= 5) {
-      await session.abortTransaction();
-      session.endSession();
-      return res.status(409).json({
-        success: false,
-        message: 'Slot is full (5/5). Cannot add more patients even as walk-in.',
-        slotFull: true,
-      });
-    }
 
     const [newAppointment] = await Appointment.create(
       [
